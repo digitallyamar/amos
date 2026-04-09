@@ -1,0 +1,4 @@
+torch
+litert-lm
+soundfile
+aksharamukha

@@ -1,4 +1,12 @@
 torch
 litert-lm
 soundfile
+sounddevice
+omegaconf
 aksharamukha
+faster-whisper
+dotenv
+kokoro>=0.9.4
+pyaudio
+silero-vad
+webrtcvad

@@ -15,6 +15,15 @@ engine = litert_lm.Engine(LLM_PATH, audio_backend=litert_lm.Backend.CPU)
 # 2. Load TTS model globally
 tts_model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models', model='silero_tts', language='indic', speaker='v3_indic')
 
+def play_cue():
+    # Option A: Play a system beep sound (if you have one)
+    subprocess.run(['aplay', 'beep.wav'], stderr=subprocess.DEVNULL)
+    
+    # # Option B: Generate a quick 200ms 1000Hz beep via speaker-test
+    # subprocess.run(['speaker-test', '-t', 'sine', '-f', '1000', '-l', '1', '-p', '0', '-X'], 
+    #                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=0.2)
+
+
 def record_audio(filename="input.wav", duration=4): 
     # Capture at 16kHz for Gemma native audio processing 
     subprocess.run(['arecord', '-f', 'S16_LE', '-r', '16000', '-c', '1', '-d', str(duration), filename], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) 
@@ -23,7 +32,9 @@ def record_audio(filename="input.wav", duration=4):
 
 def run_app(): 
     with engine.create_conversation() as conversation: 
-        while True: 
+        while True:
+            print("\n--- Ready! Speak after the beep ---")
+            play_cue() # <--- TRIGGER CUE HERE
             # Step 1: Capture 
             audio_path = record_audio() 
             # Step 2: Correct Multi-modal Structure 

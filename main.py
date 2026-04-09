@@ -5,119 +5,121 @@ import pyaudio
 import webrtcvad
 import litert_lm
 import subprocess
-import collections
 import numpy as np
 from aksharamukha import transliterate
+from openwakeword.model import Model
 
-# --- GLOBAL INITIALIZATION ---
+# --- SETTINGS ---
+os.environ['ORT_LOGGING_LEVEL'] = '3' # Suppress ONNX warnings
+WAKE_WORD = "alexa" # Or "hey_jarvis"
 LLM_PATH = os.path.expanduser("~/.cache/huggingface/hub/models--litert-community--gemma-4-E2B-it-litert-lm/snapshots/616f4124e6ff216292f16e7f73ff33b5ba9a4dd4/gemma-4-E2B-it.litertlm")
 
+# --- INITIALIZATION ---
 engine = litert_lm.Engine(LLM_PATH, audio_backend=litert_lm.Backend.CPU)
 tts_model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models', model='silero_tts', language='indic', speaker='v3_indic')
+oww_model = Model(wakeword_models=[WAKE_WORD])
+vad = webrtcvad.Vad(3)
+pa = pyaudio.PyAudio()
 
 def play_cue():
     subprocess.run(['aplay', 'beep.wav'], stderr=subprocess.DEVNULL)
 
-def record_audio_vad(filename="input.wav", sample_rate=16000):
-    vad = webrtcvad.Vad(3)
-    pa = pyaudio.PyAudio()
-    frame_duration_ms = 30
-    chunk_size = int(sample_rate * frame_duration_ms / 1000)
+def listen_and_process(stream, conversation):
+    """Wait for wake word, then record speech, then get LLM response."""
     
-    stream = pa.open(format=pyaudio.paInt16, channels=1, rate=sample_rate,
-                     input=True, frames_per_buffer=chunk_size)
+    # 1. WAIT FOR WAKE WORD
+    print(f"Listening for '{WAKE_WORD}'...")
+    while True:
+        data = stream.read(1280, exception_on_overflow=False)
+        audio_frame = np.frombuffer(data, dtype=np.int16)
+        prediction = oww_model.predict(audio_frame)
+        if prediction[WAKE_WORD] > 0.5:
+            print(f"Wake word detected!")
+            break
 
-    print("Listening for speech...")
+    # 2. TRIGGER CUE AND RECORD VAD
+    play_cue()
+    print("Recording speech...")
     frames = []
     num_silent_frames = 0
     speech_detected = False
-    max_silence_frames = int(1000 / frame_duration_ms) 
+    
+    # Settings for VAD (using 30ms frames to match 16kHz)
+    chunk_vad = 480 
+    max_silence_frames = 30 # ~1 second of silence to stop
 
     while True:
-        data = stream.read(chunk_size, exception_on_overflow=False)
-        is_speech = vad.is_speech(data, sample_rate)
+        data = stream.read(chunk_vad, exception_on_overflow=False)
+        is_speech = vad.is_speech(data, 16000)
 
         if not speech_detected:
             if is_speech:
                 speech_detected = True
-                print("Speech started...")
                 frames.append(data)
         else:
             frames.append(data)
-            if not is_speech:
-                num_silent_frames += 1
-            else:
-                num_silent_frames = 0
+            num_silent_frames = 0 if is_speech else num_silent_frames + 1
             if num_silent_frames > max_silence_frames:
-                print("Speech ended.")
                 break
 
-    stream.stop_stream()
-    stream.close()
-    pa.terminate()
-
-    with wave.open(filename, 'wb') as wf:
+    # Save audio for Gemma
+    temp_file = os.path.abspath("input.wav")
+    with wave.open(temp_file, 'wb') as wf:
         wf.setnchannels(1)
-        wf.setsampwidth(pa.get_sample_size(pyaudio.paInt16))
-        wf.setframerate(sample_rate)
+        wf.setsampwidth(2) # 16-bit
+        wf.setframerate(16000)
         wf.writeframes(b''.join(frames))
-
-    return os.path.abspath(filename)
+    
+    return temp_file
 
 def run_app(): 
+    # Open a single persistent stream for efficiency
+    stream = pa.open(format=pyaudio.paInt16, channels=1, rate=16000, 
+                     input=True, frames_per_buffer=1280)
+    
     with engine.create_conversation() as conversation: 
-        # Wake up Bluetooth pods
         subprocess.run(['aplay', 'silence.wav'], stderr=subprocess.DEVNULL)
-        
-        # Track the playback process globally within the loop
         playback_process = None
 
         while True:
-            # --- ASYNC CHECK ---
-            # If the assistant is still talking from the previous turn, 
-            # wait for it to finish before showing the "Ready" prompt.
+            # Wait for previous response to finish playing
             if playback_process and playback_process.poll() is None:
                 playback_process.wait()
 
-            print("\n--- Ready! Speak after the beep ---")
-            play_cue() 
-            
-            audio_path = record_audio_vad() 
-            
-            user_message = { 
-                "role": "user", 
-                "content": [ 
-                    {"type": "audio", "path": audio_path}, 
-                    {"type": "text", "text": "संक्षेप में उत्तर दें।"} 
-                ] 
-            } 
-            
-            print("--- Gemma is processing audio ---") 
-            try: 
+            try:
+                # Get audio input via Wake Word + VAD
+                audio_path = listen_and_process(stream, conversation)
+                
+                print("--- Gemma is processing ---") 
+                user_message = { 
+                    "role": "user", 
+                    "content": [ 
+                        {"type": "audio", "path": audio_path}, 
+                        {"type": "text", "text": "à¤¸à¤‚à¤•à¥à¤·à¥‡à¤ª à¤®à¥‡à¤‚ à¤‰à¤¤à¥à¤¤à¤° à¤¦à¥‡à¤‚à¥¤"} 
+                    ] 
+                } 
+
                 response = conversation.send_message(user_message) 
                 answer = response["content"][0]["text"] 
                 print(f"Gemma: {answer}") 
 
-                # TTS Processing
+                # TTS & Async Playback
                 roman_text = transliterate.process('Devanagari', 'ISO', answer) 
                 audio_out = tts_model.apply_tts(roman_text, speaker='hindi_male') 
                 audio_int16 = (audio_out.numpy().flatten() * 32767).astype(np.int16) 
 
-                # --- NON-BLOCKING PLAYBACK ---
-                # We start the process and write to stdin immediately.
-                # Because we don't call .communicate(), Python continues execution 
-                # as soon as the data is handed off to the OS audio buffer.
                 playback_process = subprocess.Popen(
                     ['aplay', '-t', 'raw', '-f', 'S16_LE', '-r', '48000', '-c', '1'],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
+                    stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
                 )
                 playback_process.stdin.write(audio_int16.tobytes())
-                playback_process.stdin.close() # Signal end of data to aplay
+                playback_process.stdin.close() 
 
             except Exception as e: 
-                print(f"Error during inference: {e}")
+                print(f"Error: {e}")
 
 if __name__ == "__main__": 
-    run_app()
+    try:
+        run_app()
+    finally:
+        pa.terminate()
